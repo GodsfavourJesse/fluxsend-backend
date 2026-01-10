@@ -12,7 +12,7 @@
     "keywords": [],
     "author": "",
     "license": "ISC",
-    "type": "commmonjs",
+    "type": "commonjs",
     "dependencies": {
         "cors": "^2.8.5",
         "dotenv": "^17.2.3",
