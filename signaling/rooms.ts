@@ -42,3 +42,6 @@ export function areDevicesInSameRoom(a: string, b: string): boolean {
     return false;
 }
 
+export function generateRoomCode() {
+    return Math.random().toString(36).substring(2, 10).toUpperCase();
+}

@@ -29,3 +29,7 @@ wss.on("connection", (ws, req) => {
 });
 
 console.log("Backend initialized. Waiting for connections...");
+
+app.get("/", (_, res) => {
+    res.send("Fluxsend backend running");
+});

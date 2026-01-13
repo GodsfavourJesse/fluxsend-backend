@@ -65,6 +65,7 @@ export function handleSocket(ws: any) {
                     d?.socket.send(JSON.stringify({
                         type: "room-joined",
                         roomId: message.roomId,
+                        peerName: getDevice(deviceId)?.name,
                         devices: Array.from(room.devices)
                     }));
                 });
@@ -98,9 +99,19 @@ export function handleSocket(ws: any) {
         }
     });
 
+    // Ping every 30s
+    const pingInterval = setInterval(() => {
+        if (ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify({ type: "ping" }));
+        }
+    }, 30000);
+
     ws.on("close", () => {
         removeDevice(deviceId);
         removeDeviceFromRooms(deviceId);
+        clearInterval((pingInterval));
         console.log("🔹 Device disconnected:", deviceId);
     });
+
+
 }
