@@ -1,94 +1,107 @@
 import { v4 as uuid } from "uuid";
-import { registerDevice, removeDevice, listDevices, getDevice } from "./devices";
+import { registerDevice, removeDevice, getDevice } from "./devices";
 import { createRoom, joinRoom, removeDeviceFromRooms, areDevicesInSameRoom } from "./rooms";
 
 export function handleSocket(ws: any) {
     const deviceId = uuid();
     console.log("🔹 New WebSocket connection:", deviceId);
 
-    ws.on("message", (raw: string | Buffer) => {
+    ws.on("message", (raw: string) => {
         let message: any;
 
         try {
-            message = JSON.parse(raw.toString());
+            message = JSON.parse(raw);
         } catch {
             return;
         }
 
         switch (message.type) {
-            case "register":
+            case "create-room":
                 registerDevice({
                     id: deviceId,
                     socket: ws,
-                    name: message.name || "Unknown"
+                    name: message.deviceName || "Unknown"
                 });
 
-                ws.send(JSON.stringify({
-                    type: "devices",
-                    devices: listDevices()
-                }));
-                break;
+                const { id, token } = createRoom(deviceId);
 
-            case "signal": {
-                const target = getDevice(message.targetId);
-                if (target) {
-                    target.socket.send(JSON.stringify({
-                        type: "signal",
-                        from: deviceId,
-                        data: message.data
-                    }));
-                }
-                break;
-            }
-
-            case "create-room": {
-                const roomId = createRoom(deviceId);
                 ws.send(JSON.stringify({
                     type: "room-created",
-                    roomId
+                    roomId: id,
+                    token
+                    // devices: listDevices()
                 }));
                 break;
-            }
+
+            // case "signal": {
+            //     const target = getDevice(message.targetId);
+            //     if (target) {
+            //         target.socket.send(JSON.stringify({
+            //             type: "signal",
+            //             from: deviceId,
+            //             data: message.data
+            //         }));
+            //     }
+            //     break;
+            // }
+
+            // case "create-room": {
+            //     const roomId = createRoom(deviceId);
+            //     ws.send(JSON.stringify({
+            //         type: "room-created",
+            //         roomId
+            //     }));
+            //     break;
+            // }
 
             case "join-room": {
-                const room = joinRoom(message.roomId, deviceId);
+                registerDevice({
+                    id: deviceId,
+                    socket: ws,
+                    name: message.deviceName || "Unknown",
+                })
+
+                const room = joinRoom(
+                    message.roomId,
+                    message.token,
+                    deviceId
+                );
+
                 if (!room) {
                     ws.send(JSON.stringify({
                         type: "error",
-                        message: "Room not found"
-                    }));
-                    break;
-                }
-
-                room.devices.forEach(id => {
-                    const d = getDevice(id);
-                    d?.socket.send(JSON.stringify({
-                        type: "room-joined",
-                        roomId: message.roomId,
-                        peerName: getDevice(deviceId)?.name,
-                        devices: Array.from(room.devices)
-                    }));
-                });
-                break;
-            }
-
-            case "file-chunk": {
-                const targetId = message.targetId;
-                const receiver = getDevice(targetId);
-
-                if (!receiver) return;
-
-                const allowed = areDevicesInSameRoom(deviceId, targetId);
-
-                if (!allowed) {
-                    ws.send(JSON.stringify({
-                        type: "error",
-                        message: "Devices are not paired"
+                        message: "Invalid room"
                     }));
                     return;
                 }
 
-                receiver.socket.send(JSON.stringify({
+                // Notify All devies in room
+                room.devices.forEach(id => {
+                    const device = getDevice(id);
+                    if (!device) return;
+
+                    device.socket.send(JSON.stringify({
+                        type: "peer-connected",
+                        peerName: message.deviceName
+                    }));
+                });
+
+                break;
+            }
+
+            case "file-chunk": {
+                const target = getDevice(message.targetId);
+                if (!target) return;
+
+                if (!areDevicesInSameRoom(deviceId, message.targetId)) {
+                    ws.send(JSON.stringify({
+                        type: "error",
+                        message: "Devices not paired"
+                    }));
+                    return;
+                }
+
+                target.socket.send(JSON.stringify({
                     type: "file-chunk",
                     from: deviceId,
                     chunk: message.chunk,
