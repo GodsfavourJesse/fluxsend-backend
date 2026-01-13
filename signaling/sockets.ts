@@ -1,3 +1,5 @@
+// Socket.ts
+
 import { v4 as uuid } from "uuid";
 import { registerDevice, removeDevice, getDevice } from "./devices";
 import { createRoom, joinRoom, removeDeviceFromRooms, areDevicesInSameRoom } from "./rooms";
@@ -12,10 +14,13 @@ export function handleSocket(ws: any) {
         try {
             message = JSON.parse(raw);
         } catch {
+            console.warn("Invalid JSON received");
             return;
         }
 
         switch (message.type) {
+
+            // ---------------- CREATE ROOM ----------------
             case "create-room":
                 registerDevice({
                     id: deviceId,
@@ -28,44 +33,20 @@ export function handleSocket(ws: any) {
                 ws.send(JSON.stringify({
                     type: "room-created",
                     roomId: id,
-                    token
-                    // devices: listDevices()
+                    token,
+                    role: "host",
                 }));
                 break;
 
-            // case "signal": {
-            //     const target = getDevice(message.targetId);
-            //     if (target) {
-            //         target.socket.send(JSON.stringify({
-            //             type: "signal",
-            //             from: deviceId,
-            //             data: message.data
-            //         }));
-            //     }
-            //     break;
-            // }
-
-            // case "create-room": {
-            //     const roomId = createRoom(deviceId);
-            //     ws.send(JSON.stringify({
-            //         type: "room-created",
-            //         roomId
-            //     }));
-            //     break;
-            // }
-
-            case "join-room": {
+            // ---------------- JOIN ROOM ----------------
+            case "join-room":
                 registerDevice({
                     id: deviceId,
                     socket: ws,
                     name: message.deviceName || "Unknown",
-                })
+                });
 
-                const room = joinRoom(
-                    message.roomId,
-                    message.token,
-                    deviceId
-                );
+                const room = joinRoom(message.roomId, message.token, deviceId);
 
                 if (!room) {
                     ws.send(JSON.stringify({
@@ -75,20 +56,31 @@ export function handleSocket(ws: any) {
                     return;
                 }
 
-                // Notify All devies in room
-                room.devices.forEach(id => {
-                    const device = getDevice(id);
-                    if (!device) return;
-
-                    device.socket.send(JSON.stringify({
+                // ---------------- NOTIFY HOST ----------------
+                const hostDevice = getDevice(room.host);
+                if (hostDevice) {
+                    hostDevice.socket.send(JSON.stringify({
                         type: "peer-connected",
-                        peerName: message.deviceName
+                        peerName: message.deviceName,
+                        role: "host"
                     }));
-                });
+                }
+
+                // ---------------- NOTIFY GUEST ----------------
+                const otherDevices = Array.from(room.devices).filter((id: string) => id !== deviceId);
+                const peerNames = otherDevices
+                    .map((id: string) => getDevice(id)?.name)
+                    .filter(Boolean);
+                
+                ws.send(JSON.stringify({
+                    type: "peer-connected",
+                    peerName: peerNames.join(",") || "Host",
+                    role: "guest"
+                }));
 
                 break;
-            }
 
+            // ---------------- FILE CHUNK ----------------
             case "file-chunk": {
                 const target = getDevice(message.targetId);
                 if (!target) return;
@@ -112,19 +104,22 @@ export function handleSocket(ws: any) {
         }
     });
 
-    // Ping every 30s
+    // ---------------- FAST PING ----------------
     const pingInterval = setInterval(() => {
         if (ws.readyState === ws.OPEN) {
             ws.send(JSON.stringify({ type: "ping" }));
         }
-    }, 30000);
+    }, 2000); // faster ping (5s)
 
     ws.on("close", () => {
         removeDevice(deviceId);
         removeDeviceFromRooms(deviceId);
-        clearInterval((pingInterval));
+        clearInterval(pingInterval);
         console.log("🔹 Device disconnected:", deviceId);
     });
 
-
+    ws.on("error", (err: any) => {
+        console.error("WebSocket error:", err);
+        ws.close();
+    });
 }

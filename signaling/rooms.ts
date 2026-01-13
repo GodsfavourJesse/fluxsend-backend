@@ -2,6 +2,7 @@ type Room = {
     id: string;
     token: string;
     devices: Set<string>;
+    host: string;
 };
 
 const rooms = new Map<string, Room>();
@@ -16,19 +17,23 @@ function generateRoomCode(length = 6) {
 //     return id;
 // }
 
-export function createRoom(deviceId: string) {
+// ------------------ CREATE ROOM --------------------
+export function createRoom(hostDeviceId: string) {
     const id = generateRoomCode(6);
     const token = generateRoomCode(12);
 
-    rooms.set(id, {
+    const room: Room = {
         id,
         token,
-        devices: new Set([deviceId]),
-    });
+        devices: new Set([hostDeviceId]),
+        host: hostDeviceId
+    };
 
+    rooms.set(id, room);
     return { id, token };
 }
 
+//  ----------------- JOIN ROOM -------------------
 export function joinRoom(roomId: string, token: string, deviceId: string) {
     const room = rooms.get(roomId);
     if (!room) return null;
@@ -38,6 +43,7 @@ export function joinRoom(roomId: string, token: string, deviceId: string) {
     return room;
 }
 
+// ----------------- REMOVE ROOM ----------------------
 export function removeDeviceFromRooms(deviceId: string) {
     for (const [roomId, room] of rooms.entries()) {
         room.devices.delete(deviceId);
@@ -49,10 +55,7 @@ export function removeDeviceFromRooms(deviceId: string) {
     }
 }
 
-export function getRoom(roomId: string) {
-    return rooms.get(roomId);
-}
-
+// ---------------- HELPER -----------------------
 export function areDevicesInSameRoom(a: string, b: string): boolean {
     for (const room of rooms.values()) {
         if (room.devices.has(a) && room.devices.has(b)) {
@@ -61,3 +64,8 @@ export function areDevicesInSameRoom(a: string, b: string): boolean {
     }
     return false;
 }
+
+export function getRoom(roomId: string) {
+    return rooms.get(roomId);
+}
+

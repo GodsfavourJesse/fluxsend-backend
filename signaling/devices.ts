@@ -1,6 +1,8 @@
+// Devices.ts
+
 type Device = {
     id: string;
-    socket: any;
+    socket: WebSocket;
     name: string;
 };
 
