@@ -7,6 +7,7 @@ type Room = {
     status: "waiting" | "connecting" | "connected";
     createdAt: number;
     expiresAt: number;
+    lastActivity: number;
 };
 
 const rooms = new Map<string, Room>();
@@ -20,6 +21,7 @@ function generateCode(length: number) {
 
 // CREATE ROOM
 export function createRoom(hostDeviceId: string) {
+    const now = Date.now();
     const room: Room = {
         id: generateCode(6),
         token: generateCode(12),
@@ -27,7 +29,8 @@ export function createRoom(hostDeviceId: string) {
         devices: new Set([hostDeviceId]),
         status: "waiting",
         createdAt: Date.now(),
-        expiresAt: Date.now() + 2 * 60 * 1000 // 2 minutes
+        expiresAt: Date.now() + 2 * 60 * 1000, // 2 minutes
+        lastActivity: Date.now()
     };
 
     rooms.set(room.id, room);
@@ -38,11 +41,6 @@ export function createRoom(hostDeviceId: string) {
 export function joinRoom(roomId: string, token: string, deviceId: string) {
     const room = rooms.get(roomId);
     if (!room) return null;
-    if (room.token !== token) return null;
-    if (room.expiresAt < Date.now()) {
-        rooms.delete(roomId);
-        return null;
-    }
 
     // Only allow one guest
     if (room.guest) return null;
@@ -50,16 +48,18 @@ export function joinRoom(roomId: string, token: string, deviceId: string) {
     room.devices.add(deviceId);
     room.guest = deviceId;
     room.status = "connecting";
+    room.lastActivity = Date.now();
+    room.expiresAt = Date.now() + 2 * 60 * 1000;
 
     return room;
 }
 
 // RESET ROOM TO WAITING (guest left / handshake failed)
-export function resetRoom(room: Room) {
-    room.devices.delete(room.guest!);
-    room.guest = undefined;
-    room.status = "waiting";
-}
+// export function resetRoom(room: Room) {
+//     room.devices.delete(room.guest!);
+//     room.guest = undefined;
+//     room.status = "waiting";
+// }
 
 // REMOVE DEVICE FROM ROOMS
 export function removeDeviceFromRooms(deviceId: string) {
@@ -72,7 +72,8 @@ export function removeDeviceFromRooms(deviceId: string) {
         }
 
         if (room.guest === deviceId) {
-            resetRoom(room); // guest left → host can wait again
+            room.guest = undefined;
+            room.status = "waiting";
         }
 
         if (room.devices.size === 0) {
@@ -93,7 +94,10 @@ export function getRoomByDevice(deviceId: string) {
 setInterval(() => {
     const now = Date.now();
     for (const [id, room] of rooms.entries()) {
-        if (room.status === "waiting" && room.expiresAt < now) {
+        // Never kill active host room
+        if (room.status === "waiting" && room.devices.has(room.host)) continue;
+
+        if (now - room.lastActivity > 2 * 60 * 1000) {
             rooms.delete(id);
         }
     }
