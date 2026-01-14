@@ -16,14 +16,9 @@ export function handleSocket(ws: WebSocket) {
 
         switch (message.type) {
 
-            // HOST CREATES ROOM
+            // HOST creates room
             case "create-room": {
-                registerDevice({ 
-                    id: deviceId, 
-                    socket: ws, 
-                    name: message.deviceName 
-                });
-
+                registerDevice({ id: deviceId, socket: ws, name: message.deviceName });
                 const room = createRoom(deviceId);
 
                 ws.send(JSON.stringify({
@@ -35,46 +30,48 @@ export function handleSocket(ws: WebSocket) {
                 break;
             }
 
-            // GUEST JOINS ROOM
+            // GUEST joins room
             case "join-room": {
-                registerDevice({ 
-                    id: deviceId, 
-                    socket: ws, name: 
-                    message.deviceName 
-                });
+                registerDevice({ id: deviceId, socket: ws, name: message.deviceName });
 
                 const room = joinRoom(message.roomId, message.token, deviceId);
                 if (!room) {
-                    ws.send(JSON.stringify({ 
-                        type: "error", 
-                        message: "Invalid pairing code" 
-                    }));
+                    ws.send(JSON.stringify({ type: "error", message: "Invalid pairing code" }));
                     return;
                 }
 
                 const host = getDevice(room.host);
                 if (!host) return;
 
-                // STEP 1: notify host someone is connecting
+                // Step 1: Notify HOST immediately that a guest is connecting
                 host.socket.send(JSON.stringify({
                     type: "peer-joining",
                     peerName: message.deviceName
                 }));
 
-                // STEP 2: confirm connection to BOTH
+                // Step 2: Notify GUEST that they are connecting to host
+                ws.send(JSON.stringify({
+                    type: "peer-joining",
+                    peerName: host.name
+                }));
+
+                // Step 3: After short handshake, confirm connection on BOTH
+                const handshakeDuration = 1300; // default 1.3s
                 setTimeout(() => {
                     setRoomConnected(room.id);
 
+                    // HOST gets connection established
                     host.socket.send(JSON.stringify({
                         type: "connection-established",
                         peerName: message.deviceName
                     }));
 
+                    // GUEST gets connection established
                     ws.send(JSON.stringify({
                         type: "connection-established",
                         peerName: host.name
                     }));
-                }, 300); // ultra-fast handshake
+                }, handshakeDuration);
 
                 break;
             }
