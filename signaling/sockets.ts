@@ -1,125 +1,96 @@
-// Socket.ts
-
 import { v4 as uuid } from "uuid";
+import WebSocket from "ws";
 import { registerDevice, removeDevice, getDevice } from "./devices";
-import { createRoom, joinRoom, removeDeviceFromRooms, areDevicesInSameRoom } from "./rooms";
+import { createRoom, joinRoom, removeDeviceFromRooms, setRoomConnected } from "./rooms";
 
-export function handleSocket(ws: any) {
+export function handleSocket(ws: WebSocket) {
     const deviceId = uuid();
-    console.log("🔹 New WebSocket connection:", deviceId);
 
-    ws.on("message", (raw: string) => {
+    ws.on("message", (raw) => {
         let message: any;
-
         try {
-            message = JSON.parse(raw);
+            message = JSON.parse(raw.toString());
         } catch {
-            console.warn("Invalid JSON received");
             return;
         }
 
         switch (message.type) {
 
-            // ---------------- CREATE ROOM ----------------
-            case "create-room":
-                registerDevice({
-                    id: deviceId,
-                    socket: ws,
-                    name: message.deviceName || "Unknown"
+            // HOST CREATES ROOM
+            case "create-room": {
+                registerDevice({ 
+                    id: deviceId, 
+                    socket: ws, 
+                    name: message.deviceName 
                 });
 
-                const { id, token } = createRoom(deviceId);
+                const room = createRoom(deviceId);
 
                 ws.send(JSON.stringify({
                     type: "room-created",
-                    roomId: id,
-                    token,
-                    role: "host",
+                    roomId: room.id,
+                    token: room.token,
+                    role: "host"
                 }));
                 break;
+            }
 
-            // ---------------- JOIN ROOM ----------------
-            case "join-room":
-                registerDevice({
-                    id: deviceId,
-                    socket: ws,
-                    name: message.deviceName || "Unknown",
+            // GUEST JOINS ROOM
+            case "join-room": {
+                registerDevice({ 
+                    id: deviceId, 
+                    socket: ws, name: 
+                    message.deviceName 
                 });
 
                 const room = joinRoom(message.roomId, message.token, deviceId);
-
                 if (!room) {
-                    ws.send(JSON.stringify({
-                        type: "error",
-                        message: "Invalid room"
+                    ws.send(JSON.stringify({ 
+                        type: "error", 
+                        message: "Invalid pairing code" 
                     }));
                     return;
                 }
 
-                // ---------------- NOTIFY HOST ----------------
-                const hostDevice = getDevice(room.host);
-                if (hostDevice) {
-                    hostDevice.socket.send(JSON.stringify({
-                        type: "peer-connected",
-                        peerName: message.deviceName,
-                        role: "host"
-                    }));
-                }
+                const host = getDevice(room.host);
+                if (!host) return;
 
-                // ---------------- NOTIFY GUEST ----------------
-                const otherDevices = Array.from(room.devices).filter((id: string) => id !== deviceId);
-                const peerNames = otherDevices
-                    .map((id: string) => getDevice(id)?.name)
-                    .filter(Boolean);
-                
-                ws.send(JSON.stringify({
-                    type: "peer-connected",
-                    peerName: peerNames.join(",") || "Host",
-                    role: "guest"
+                // STEP 1: notify host someone is connecting
+                host.socket.send(JSON.stringify({
+                    type: "peer-joining",
+                    peerName: message.deviceName
                 }));
 
-                break;
+                // STEP 2: confirm connection to BOTH
+                setTimeout(() => {
+                    setRoomConnected(room.id);
 
-            // ---------------- FILE CHUNK ----------------
-            case "file-chunk": {
-                const target = getDevice(message.targetId);
-                if (!target) return;
+                    host.socket.send(JSON.stringify({
+                        type: "connection-established",
+                        peerName: message.deviceName
+                    }));
 
-                if (!areDevicesInSameRoom(deviceId, message.targetId)) {
                     ws.send(JSON.stringify({
-                        type: "error",
-                        message: "Devices not paired"
+                        type: "connection-established",
+                        peerName: host.name
                     }));
-                    return;
-                }
+                }, 300); // ultra-fast handshake
 
-                target.socket.send(JSON.stringify({
-                    type: "file-chunk",
-                    from: deviceId,
-                    chunk: message.chunk,
-                    meta: message.meta
-                }));
                 break;
             }
         }
     });
 
-    // ---------------- FAST PING ----------------
-    const pingInterval = setInterval(() => {
-        if (ws.readyState === ws.OPEN) {
+    // LOW-LATENCY KEEPALIVE
+    const ping = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: "ping" }));
         }
-    }, 2000); // faster ping (5s)
+    }, 1500);
 
     ws.on("close", () => {
         removeDevice(deviceId);
         removeDeviceFromRooms(deviceId);
-        clearInterval(pingInterval);
-        console.log("🔹 Device disconnected:", deviceId);
-    });
-
-    ws.on("error", (err: any) => {
-        console.error("WebSocket error:", err);
-        ws.close();
+        clearInterval(ping);
     });
 }

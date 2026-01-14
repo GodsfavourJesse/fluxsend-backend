@@ -1,4 +1,5 @@
 // Devices.ts
+import { WebSocket } from "ws";
 
 type Device = {
     id: string;

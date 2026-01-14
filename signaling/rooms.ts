@@ -1,71 +1,65 @@
 type Room = {
     id: string;
     token: string;
-    devices: Set<string>;
     host: string;
+    guest?: string;
+    devices: Set<string>;
+    status: "waiting" | "connecting" | "connected";
 };
 
 const rooms = new Map<string, Room>();
 
-function generateRoomCode(length = 6) {
+function generateCode(length: number) {
     return Math.random().toString(36).substring(2, 2 + length).toUpperCase();
 }
 
-// export function createRoom(deviceId: string) {
-//     const id = Math.random().toString(36).substring(2, 8).toUpperCase();
-//     rooms.set(id, { id, devices: new Set([deviceId]) });
-//     return id;
-// }
-
-// ------------------ CREATE ROOM --------------------
+// CREATE ROOM
 export function createRoom(hostDeviceId: string) {
-    const id = generateRoomCode(6);
-    const token = generateRoomCode(12);
-
     const room: Room = {
-        id,
-        token,
+        id: generateCode(6),
+        token: generateCode(12),
+        host: hostDeviceId,
         devices: new Set([hostDeviceId]),
-        host: hostDeviceId
+        status: "waiting"
     };
 
-    rooms.set(id, room);
-    return { id, token };
+    rooms.set(room.id, room);
+    return { id: room.id, token: room.token };
 }
 
-//  ----------------- JOIN ROOM -------------------
+// JOIN ROOM
 export function joinRoom(roomId: string, token: string, deviceId: string) {
     const room = rooms.get(roomId);
     if (!room) return null;
     if (room.token !== token) return null;
-    
+
     room.devices.add(deviceId);
+    room.guest = deviceId;
+    room.status = "connecting";
+
     return room;
 }
 
-// ----------------- REMOVE ROOM ----------------------
-export function removeDeviceFromRooms(deviceId: string) {
-    for (const [roomId, room] of rooms.entries()) {
-        room.devices.delete(deviceId);
-
-        // Auto-destroy empty rooms
-        if (room.devices.size === 0) {
-            rooms.delete(roomId);
-        }
-    }
+export function setRoomConnected(roomId: string) {
+    const room = rooms.get(roomId);
+    if (room) room.status = "connected";
 }
 
-// ---------------- HELPER -----------------------
-export function areDevicesInSameRoom(a: string, b: string): boolean {
+export function getRoomByDevice(deviceId: string) {
     for (const room of rooms.values()) {
-        if (room.devices.has(a) && room.devices.has(b)) {
-            return true;
-        }
+        if (room.devices.has(deviceId)) return room;
     }
-    return false;
+    return null;
 }
 
-export function getRoom(roomId: string) {
-    return rooms.get(roomId);
+export function areDevicesInSameRoom(a: string, b: string) {
+    const roomA = getRoomByDevice(a);
+    return roomA ? roomA.devices.has(b) : false;
 }
 
+export function removeDeviceFromRooms(deviceId: string) {
+    for (const [id, room] of rooms.entries()) {
+        room.devices.delete(deviceId);
+        if (room.devices.size === 0) rooms.delete(id);
+    }
+}
