@@ -5,12 +5,17 @@ type Room = {
     guest?: string;
     devices: Set<string>;
     status: "waiting" | "connecting" | "connected";
+    createdAt: number;
+    expiresAt: number;
 };
 
 const rooms = new Map<string, Room>();
 
 function generateCode(length: number) {
-    return Math.random().toString(36).substring(2, 2 + length).toUpperCase();
+    return Math.random()
+        .toString(36)
+        .substring(2, 2 + length)
+        .toUpperCase();
 }
 
 // CREATE ROOM
@@ -20,11 +25,13 @@ export function createRoom(hostDeviceId: string) {
         token: generateCode(12),
         host: hostDeviceId,
         devices: new Set([hostDeviceId]),
-        status: "waiting"
+        status: "waiting",
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 2 * 60 * 1000 // 2 minutes
     };
 
     rooms.set(room.id, room);
-    return { id: room.id, token: room.token };
+    return room;
 }
 
 // JOIN ROOM
@@ -32,6 +39,13 @@ export function joinRoom(roomId: string, token: string, deviceId: string) {
     const room = rooms.get(roomId);
     if (!room) return null;
     if (room.token !== token) return null;
+    if (room.expiresAt < Date.now()) {
+        rooms.delete(roomId);
+        return null;
+    }
+
+    // Only allow one guest
+    if (room.guest) return null;
 
     room.devices.add(deviceId);
     room.guest = deviceId;
@@ -40,11 +54,34 @@ export function joinRoom(roomId: string, token: string, deviceId: string) {
     return room;
 }
 
-export function setRoomConnected(roomId: string) {
-    const room = rooms.get(roomId);
-    if (room) room.status = "connected";
+// RESET ROOM TO WAITING (guest left / handshake failed)
+export function resetRoom(room: Room) {
+    room.devices.delete(room.guest!);
+    room.guest = undefined;
+    room.status = "waiting";
 }
 
+// REMOVE DEVICE FROM ROOMS
+export function removeDeviceFromRooms(deviceId: string) {
+    for (const [id, room] of rooms.entries()) {
+        room.devices.delete(deviceId);
+
+        if (room.host === deviceId) {
+            rooms.delete(id); // host left → destroy room
+            continue;
+        }
+
+        if (room.guest === deviceId) {
+            resetRoom(room); // guest left → host can wait again
+        }
+
+        if (room.devices.size === 0) {
+            rooms.delete(id);
+        }
+    }
+}
+
+// FIND ROOM BY DEVICE
 export function getRoomByDevice(deviceId: string) {
     for (const room of rooms.values()) {
         if (room.devices.has(deviceId)) return room;
@@ -52,14 +89,12 @@ export function getRoomByDevice(deviceId: string) {
     return null;
 }
 
-export function areDevicesInSameRoom(a: string, b: string) {
-    const roomA = getRoomByDevice(a);
-    return roomA ? roomA.devices.has(b) : false;
-}
-
-export function removeDeviceFromRooms(deviceId: string) {
+// CLEANUP EXPIRED ROOMS
+setInterval(() => {
+    const now = Date.now();
     for (const [id, room] of rooms.entries()) {
-        room.devices.delete(deviceId);
-        if (room.devices.size === 0) rooms.delete(id);
+        if (room.status === "waiting" && room.expiresAt < now) {
+            rooms.delete(id);
+        }
     }
-}
+}, 10_000);

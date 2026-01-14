@@ -1,7 +1,7 @@
 import { v4 as uuid } from "uuid";
 import WebSocket from "ws";
 import { registerDevice, removeDevice, getDevice } from "./devices";
-import { createRoom, joinRoom, removeDeviceFromRooms, setRoomConnected } from "./rooms";
+import { createRoom, joinRoom, removeDeviceFromRooms, getRoomByDevice } from "./rooms";
 
 export function handleSocket(ws: WebSocket) {
     const deviceId = uuid();
@@ -10,8 +10,7 @@ export function handleSocket(ws: WebSocket) {
         let message: any;
         try {
             message = JSON.parse(raw.toString());
-        } catch (err) {
-            console.error("Invalid JSON received:", raw.toString());
+        } catch {
             return;
         }
 
@@ -19,6 +18,22 @@ export function handleSocket(ws: WebSocket) {
             // HOST creates room
             case "create-room": {
                 registerDevice({ id: deviceId, socket: ws, name: message.deviceName });
+
+                const room = createRoom(deviceId);
+
+                ws.send(JSON.stringify({
+                    type: "room-created",
+                    roomId: room.id,
+                    token: room.token,
+                    role: "host"
+                }));
+                break;
+            }
+
+            // RETRY (generate new code)
+            case "retry-room": {
+                removeDeviceFromRooms(deviceId);
+
                 const room = createRoom(deviceId);
 
                 ws.send(JSON.stringify({
@@ -36,7 +51,10 @@ export function handleSocket(ws: WebSocket) {
 
                 const room = joinRoom(message.roomId, message.token, deviceId);
                 if (!room) {
-                    ws.send(JSON.stringify({ type: "error", message: "Invalid pairing code" }));
+                    ws.send(JSON.stringify({
+                        type: "error",
+                        message: "Invalid or expired code"
+                    }));
                     return;
                 }
 
@@ -49,29 +67,25 @@ export function handleSocket(ws: WebSocket) {
                     return;
                 }
 
-                // Step 1: Notify HOST immediately
+                // Notify both sides (CONNECTING)
                 host.socket.send(JSON.stringify({
                     type: "peer-joining",
                     peerName: message.deviceName
                 }));
 
-                // Step 2: Notify GUEST immediately
                 ws.send(JSON.stringify({
                     type: "peer-joining",
                     peerName: host.name
                 }));
 
-                // Mark room status
-                room.status = "connecting";
-                room.guest = deviceId;
+                // HANDSHAKE (only AFTER guest joins)
+                const handshakeDuration = 3000; // 3 seconds
 
-                // Step 3: Confirm connection after handshake
-                const handshakeDuration = 1300; // 1.3s
                 setTimeout(() => {
                     const hostOpen = host.socket.readyState === WebSocket.OPEN;
                     const guestOpen = ws.readyState === WebSocket.OPEN;
 
-                    if (hostOpen && guestOpen) {
+                    if (hostOpen && guestOpen && room.status === "connecting") {
                         room.status = "connected";
 
                         host.socket.send(JSON.stringify({
@@ -83,21 +97,11 @@ export function handleSocket(ws: WebSocket) {
                             type: "connection-established",
                             peerName: host.name
                         }));
-
-                        console.log(`Connection established between ${host.name} and ${message.deviceName}`);
                     } else {
-                        console.log("Connection failed during handshake", { hostOpen, guestOpen });
-
+                        // Handshake failed → reset room
                         if (hostOpen) {
                             host.socket.send(JSON.stringify({
-                                type: "error",
-                                message: "Guest disconnected before connection"
-                            }));
-                        }
-                        if (guestOpen) {
-                            ws.send(JSON.stringify({
-                                type: "error",
-                                message: "Host disconnected before connection"
+                                type: "peer-disconnected"
                             }));
                         }
 
@@ -111,7 +115,7 @@ export function handleSocket(ws: WebSocket) {
         }
     });
 
-    // LOW-LATENCY KEEPALIVE
+    // KEEPALIVE
     const ping = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: "ping" }));
@@ -119,13 +123,26 @@ export function handleSocket(ws: WebSocket) {
     }, 1500);
 
     ws.on("close", () => {
-        console.log(`🔌 Device disconnected: ${deviceId}`);
+        const room = getRoomByDevice(deviceId);
+
+        if (room) {
+            const peerId =
+                room.host === deviceId ? room.guest : room.host;
+
+            if (peerId) {
+                const peer = getDevice(peerId);
+                if (peer?.socket.readyState === WebSocket.OPEN) {
+                    peer.socket.send(JSON.stringify({
+                        type: "peer-disconnected"
+                    }));
+                }
+            }
+        }
+
         removeDevice(deviceId);
         removeDeviceFromRooms(deviceId);
         clearInterval(ping);
     });
 
-    ws.on("error", (err) => {
-        console.error("WebSocket error:", err);
-    });
+    ws.on("error", () => {});
 }
