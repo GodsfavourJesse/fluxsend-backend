@@ -10,12 +10,12 @@ export function handleSocket(ws: WebSocket) {
         let message: any;
         try {
             message = JSON.parse(raw.toString());
-        } catch {
+        } catch (err) {
+            console.error("Invalid JSON received:", raw.toString());
             return;
         }
 
         switch (message.type) {
-
             // HOST creates room
             case "create-room": {
                 registerDevice({ id: deviceId, socket: ws, name: message.deviceName });
@@ -41,36 +41,69 @@ export function handleSocket(ws: WebSocket) {
                 }
 
                 const host = getDevice(room.host);
-                if (!host) return;
+                if (!host || host.socket.readyState !== WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: "error",
+                        message: "Host not available"
+                    }));
+                    return;
+                }
 
-                // Step 1: Notify HOST immediately that a guest is connecting
+                // Step 1: Notify HOST immediately
                 host.socket.send(JSON.stringify({
                     type: "peer-joining",
                     peerName: message.deviceName
                 }));
 
-                // Step 2: Notify GUEST that they are connecting to host
+                // Step 2: Notify GUEST immediately
                 ws.send(JSON.stringify({
                     type: "peer-joining",
                     peerName: host.name
                 }));
 
-                // Step 3: After short handshake, confirm connection on BOTH
-                const handshakeDuration = 1300; // default 1.3s
+                // Mark room status
+                room.status = "connecting";
+                room.guest = deviceId;
+
+                // Step 3: Confirm connection after handshake
+                const handshakeDuration = 1300; // 1.3s
                 setTimeout(() => {
-                    setRoomConnected(room.id);
+                    const hostOpen = host.socket.readyState === WebSocket.OPEN;
+                    const guestOpen = ws.readyState === WebSocket.OPEN;
 
-                    // HOST gets connection established
-                    host.socket.send(JSON.stringify({
-                        type: "connection-established",
-                        peerName: message.deviceName
-                    }));
+                    if (hostOpen && guestOpen) {
+                        room.status = "connected";
 
-                    // GUEST gets connection established
-                    ws.send(JSON.stringify({
-                        type: "connection-established",
-                        peerName: host.name
-                    }));
+                        host.socket.send(JSON.stringify({
+                            type: "connection-established",
+                            peerName: message.deviceName
+                        }));
+
+                        ws.send(JSON.stringify({
+                            type: "connection-established",
+                            peerName: host.name
+                        }));
+
+                        console.log(`Connection established between ${host.name} and ${message.deviceName}`);
+                    } else {
+                        console.log("Connection failed during handshake", { hostOpen, guestOpen });
+
+                        if (hostOpen) {
+                            host.socket.send(JSON.stringify({
+                                type: "error",
+                                message: "Guest disconnected before connection"
+                            }));
+                        }
+                        if (guestOpen) {
+                            ws.send(JSON.stringify({
+                                type: "error",
+                                message: "Host disconnected before connection"
+                            }));
+                        }
+
+                        removeDeviceFromRooms(deviceId);
+                        removeDevice(deviceId);
+                    }
                 }, handshakeDuration);
 
                 break;
@@ -86,8 +119,13 @@ export function handleSocket(ws: WebSocket) {
     }, 1500);
 
     ws.on("close", () => {
+        console.log(`🔌 Device disconnected: ${deviceId}`);
         removeDevice(deviceId);
         removeDeviceFromRooms(deviceId);
         clearInterval(ping);
+    });
+
+    ws.on("error", (err) => {
+        console.error("WebSocket error:", err);
     });
 }
