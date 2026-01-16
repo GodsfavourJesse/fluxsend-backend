@@ -7,6 +7,7 @@ import {
     removeDeviceFromRooms,
     getRoomByDevice
 } from "./rooms";
+import { relayMessage } from "./relay";
 
 const HANDSHAKE_DURATION = 15_000;
 
@@ -14,6 +15,14 @@ export function handleSocket(ws: WebSocket) {
     const deviceId = uuid();
 
     ws.on("message", (raw) => {
+
+        // HANDLE BINARY FILE CHUNKS
+        if (raw instanceof Buffer) {
+            relayMessage(deviceId, raw);
+            return;
+        }
+
+
         let message: any;
         try {
             message = JSON.parse(raw.toString());
@@ -84,7 +93,11 @@ export function handleSocket(ws: WebSocket) {
                 }, HANDSHAKE_DURATION);
 
                 break;
+
             }
+            default:
+                // RELAY EVERYTHING ELSE
+                relayMessage(deviceId, JSON.stringify(message));
         }
     });
 
