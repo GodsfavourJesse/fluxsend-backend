@@ -14,10 +14,10 @@ const HANDSHAKE_DURATION = 15_000;
 export function handleSocket(ws: WebSocket) {
     const deviceId = uuid();
 
-    ws.on("message", (raw) => {
+    ws.on("message", (raw, isBinary) => {
 
         // HANDLE BINARY FILE CHUNKS
-        if (raw instanceof Buffer) {
+        if (isBinary) {
             relayMessage(deviceId, raw);
             return;
         }
