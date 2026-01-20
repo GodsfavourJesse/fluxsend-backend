@@ -59,7 +59,7 @@ export function handleSocket(ws: WebSocket) {
         // Update activity
         lastPingTime = Date.now();
 
-        // ✅ FIX 3: Do NOT rate-limit binary chunks
+        // FIX 3: Do NOT rate-limit binary chunks
         if (!isBinary) {
             messageCount++;
             if (messageCount > messageLimit) {
@@ -87,7 +87,7 @@ export function handleSocket(ws: WebSocket) {
                 return;
             }
 
-            // ✅ FIXED: Proper length check for RawData
+            // FIXED: Proper length check for RawData
             const dataLength = getDataLength(raw);
             if (dataLength > 64 * 1024 * 1024) { // 64MB max chunk
                 ws.send(JSON.stringify({ 
@@ -103,7 +103,7 @@ export function handleSocket(ws: WebSocket) {
 
         let message: any;
         try {
-            // ✅ FIXED: Proper length check for RawData
+            // FIXED: Proper length check for RawData
             const dataLength = getDataLength(raw);
             if (dataLength > MAX_MESSAGE_SIZE) {
                 ws.send(JSON.stringify({ 
@@ -221,7 +221,7 @@ export function handleSocket(ws: WebSocket) {
                     break;
                 }
 
-                // ✅ FIX 1: Peer ready confirmation
+                // FIX 1: Peer ready confirmation
                 case "peer-ready": {
                     if (!isAuthenticated) {
                         ws.close(1008, "Unauthorized");
@@ -252,7 +252,7 @@ export function handleSocket(ws: WebSocket) {
                         return;
                     }
 
-                    // ✅ FIXED: Get host device properly
+                    // FIXED: Get host device properly
                     const hostDevice = getDevice(room.host);
                     const guestDevice = room.guest ? getDevice(room.guest) : null;
 
@@ -281,7 +281,7 @@ export function handleSocket(ws: WebSocket) {
                             }));
                         }
 
-                        console.log(`✅ Room ${room.id} fully connected`);
+                        console.log(`Room ${room.id} fully connected`);
                     }
                     break;
                 }
@@ -389,7 +389,24 @@ export function handleSocket(ws: WebSocket) {
                     break;
                 }
 
-                // ✅ FIX 4: Pong response
+                case "graceful-disconnect": {
+                    if (!isAuthenticated) return;
+                    
+                    const room = getRoomByDevice(deviceId);
+                    if (!room) return;
+                    
+                    // Relay disconnect message to peer
+                    relayMessage(deviceId, JSON.stringify({
+                        type: "graceful-disconnect",
+                        message: message.message || "Peer left the room"
+                    }));
+                    
+                    // Close connection
+                    ws.close(1000, "Graceful disconnect");
+                    break;
+                }
+
+                // FIX 4: Pong response
                 case "pong": {
                     lastPingTime = Date.now();
                     break;
@@ -410,7 +427,7 @@ export function handleSocket(ws: WebSocket) {
         }
     });
 
-    // ✅ FIX 4: Enhanced ping/pong
+    // FIX 4: Enhanced ping/pong
     const ping = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
             // Check if client is still alive
