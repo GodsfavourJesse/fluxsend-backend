@@ -1,5 +1,5 @@
 import { v4 as uuid } from "uuid";
-import WebSocket from "ws";
+import WebSocket, { RawData } from "ws";
 import { registerDevice, removeDevice, getDevice } from "./devices";
 import {
     createRoom,
@@ -10,116 +10,462 @@ import {
 import { relayMessage } from "./relay";
 
 const HANDSHAKE_DURATION = 15_000;
+const MAX_MESSAGE_SIZE = 10 * 1024 * 1024; // 10MB for text/clipboard
+const PING_INTERVAL = 30_000; // 30s ping
+const CONNECTION_TIMEOUT = 45_000; // Render-safe
+
+// Helper to get buffer length from RawData
+function getDataLength(data: RawData): number {
+    if (Buffer.isBuffer(data)) {
+        return data.length;
+    }
+    if (Array.isArray(data)) {
+        return data.reduce((acc, buf) => acc + buf.length, 0);
+    }
+    if (data instanceof ArrayBuffer) {
+        return data.byteLength;
+    }
+    return 0;
+}
+
+// Helper to convert RawData to Buffer
+function toBuffer(data: RawData): Buffer {
+    if (Buffer.isBuffer(data)) {
+        return data;
+    }
+    if (Array.isArray(data)) {
+        return Buffer.concat(data);
+    }
+    if (data instanceof ArrayBuffer) {
+        return Buffer.from(data);
+    }
+    return Buffer.from([]);
+}
 
 export function handleSocket(ws: WebSocket) {
     const deviceId = uuid();
+    let isAuthenticated = false;
+    let isPeerReady = false;
+    let lastPingTime = Date.now();
 
-    ws.on("message", (raw, isBinary) => {
+    // Rate limiting (excluding binary chunks)
+    let messageCount = 0;
+    const messageLimit = 100; // 100 messages per minute
+    const resetInterval = setInterval(() => {
+        messageCount = 0;
+    }, 60_000);
+
+    ws.on("message", (raw: RawData, isBinary: boolean) => {
+        // Update activity
+        lastPingTime = Date.now();
+
+        // ✅ FIX 3: Do NOT rate-limit binary chunks
+        if (!isBinary) {
+            messageCount++;
+            if (messageCount > messageLimit) {
+                ws.send(JSON.stringify({ 
+                    type: "error", 
+                    message: "Rate limit exceeded. Slow down!" 
+                }));
+                return;
+            }
+        }
 
         // HANDLE BINARY FILE CHUNKS
         if (isBinary) {
-            relayMessage(deviceId, raw);
+            if (!isAuthenticated) {
+                ws.close(1008, "Unauthorized");
+                return;
+            }
+
+            const room = getRoomByDevice(deviceId);
+            if (!room || room.status !== "connected") {
+                ws.send(JSON.stringify({
+                    type: "error",
+                    message: "File transfer not ready"
+                }));
+                return;
+            }
+
+            // ✅ FIXED: Proper length check for RawData
+            const dataLength = getDataLength(raw);
+            if (dataLength > 64 * 1024 * 1024) { // 64MB max chunk
+                ws.send(JSON.stringify({ 
+                    type: "error", 
+                    message: "Chunk too large" 
+                }));
+                return;
+            }
+
+            relayMessage(deviceId, toBuffer(raw));
             return;
         }
-
 
         let message: any;
         try {
-            message = JSON.parse(raw.toString());
-        } catch {
+            // ✅ FIXED: Proper length check for RawData
+            const dataLength = getDataLength(raw);
+            if (dataLength > MAX_MESSAGE_SIZE) {
+                ws.send(JSON.stringify({ 
+                    type: "error", 
+                    message: "Message too large" 
+                }));
+                return;
+            }
+            
+            const buffer = toBuffer(raw);
+            message = JSON.parse(buffer.toString());
+        } catch (error) {
+            ws.send(JSON.stringify({ 
+                type: "error", 
+                message: "Invalid JSON" 
+            }));
             return;
         }
 
-        switch (message.type) {
-            case "create-room": {
-                registerDevice({ id: deviceId, socket: ws, name: message.deviceName });
-                const room = createRoom(deviceId);
+        try {
+            switch (message.type) {
+                case "create-room": {
+                    if (!message.deviceName || typeof message.deviceName !== 'string') {
+                        ws.send(JSON.stringify({ 
+                            type: "error", 
+                            message: "Invalid device name" 
+                        }));
+                        return;
+                    }
 
-                ws.send(JSON.stringify({
-                    type: "room-created",
-                    roomId: room.id,
-                    token: room.token,
-                    role: "host"
-                }));
-                break;
-            }
+                    registerDevice({ 
+                        id: deviceId, 
+                        socket: ws, 
+                        name: message.deviceName.slice(0, 50)
+                    });
+                    
+                    isAuthenticated = true;
+                    isPeerReady = false;
+                    
+                    const room = createRoom(deviceId);
 
-            case "join-room": {
-                registerDevice({ id: deviceId, socket: ws, name: message.deviceName });
-                const room = joinRoom(message.roomId, message.token, deviceId);
-
-                if (!room) {
-                    ws.send(JSON.stringify({ type: "error", message: "Invalid or expired code" }));
-                    return;
+                    ws.send(JSON.stringify({
+                        type: "room-created",
+                        roomId: room.id,
+                        token: room.token,
+                        role: "host"
+                    }));
+                    break;
                 }
 
-                const host = getDevice(room.host);
-                if (!host) return;
+                case "join-room": {
+                    if (!message.roomId || !message.deviceName) {
+                        ws.send(JSON.stringify({ 
+                            type: "error", 
+                            message: "Missing roomId or deviceName" 
+                        }));
+                        return;
+                    }
 
-                host.socket.send(JSON.stringify({
-                    type: "peer-joining",
-                    peerName: message.deviceName
-                }));
+                    registerDevice({ 
+                        id: deviceId, 
+                        socket: ws, 
+                        name: message.deviceName.slice(0, 50)
+                    });
+                    
+                    isAuthenticated = true;
+                    isPeerReady = false;
 
-                ws.send(JSON.stringify({
-                    type: "peer-joining",
-                    peerName: host.name
-                }));
+                    const room = joinRoom(
+                        message.roomId.toUpperCase(), 
+                        message.token || "", 
+                        deviceId
+                    );
 
-                setTimeout(() => {
-                    if (room.status !== "connecting") return;
+                    if (!room) {
+                        ws.send(JSON.stringify({ 
+                            type: "error", 
+                            message: "Invalid room code or room is full" 
+                        }));
+                        return;
+                    }
 
-                    if (
-                        host.socket.readyState === WebSocket.OPEN &&
-                        ws.readyState === WebSocket.OPEN
-                    ) {
+                    const host = getDevice(room.host);
+                    if (!host) {
+                        ws.send(JSON.stringify({ 
+                            type: "error", 
+                            message: "Host disconnected" 
+                        }));
+                        return;
+                    }
+
+                    // Notify host
+                    host.socket.send(JSON.stringify({
+                        type: "peer-joining",
+                        peerName: message.deviceName,
+                        peerId: deviceId
+                    }));
+
+                    // Notify guest
+                    ws.send(JSON.stringify({
+                        type: "peer-joining",
+                        peerName: host.name,
+                        peerId: room.host
+                    }));
+
+                    // Exchange encryption keys if provided
+                    if (message.encryptionKey) {
+                        host.socket.send(JSON.stringify({
+                            type: "encryption-key",
+                            key: message.encryptionKey,
+                            from: deviceId
+                        }));
+                    }
+
+                    break;
+                }
+
+                // ✅ FIX 1: Peer ready confirmation
+                case "peer-ready": {
+                    if (!isAuthenticated) {
+                        ws.close(1008, "Unauthorized");
+                        return;
+                    }
+
+                    const room = getRoomByDevice(deviceId);
+                    if (!room) {
+                        ws.send(JSON.stringify({
+                            type: "error",
+                            message: "No room found"
+                        }));
+                        return;
+                    }
+
+                    isPeerReady = true;
+
+                    // Get the peer's ID
+                    const peerId = room.host === deviceId ? room.guest : room.host;
+                    if (!peerId) {
+                        console.log("No peer ID found yet");
+                        return;
+                    }
+
+                    const peer = getDevice(peerId);
+                    if (!peer) {
+                        console.log("Peer device not found");
+                        return;
+                    }
+
+                    // ✅ FIXED: Get host device properly
+                    const hostDevice = getDevice(room.host);
+                    const guestDevice = room.guest ? getDevice(room.guest) : null;
+
+                    if (!hostDevice) {
+                        console.log("Host device not found");
+                        return;
+                    }
+
+                    // Mark room as connected only when BOTH are ready
+                    if (room.status === "connecting") {
                         room.status = "connected";
                         room.lastActivity = Date.now();
 
-                        host.socket.send(JSON.stringify({
-                            type: "connection-established",
-                            peerName: message.deviceName
-                        }));
+                        // Notify both peers
+                        if (guestDevice) {
+                            hostDevice.socket.send(JSON.stringify({
+                                type: "connection-established",
+                                peerName: guestDevice.name,
+                                peerId: room.guest
+                            }));
 
-                        ws.send(JSON.stringify({
-                            type: "connection-established",
-                            peerName: host.name
-                        }));
-                    } else {
-                        room.status = "waiting";
-                        room.guest = undefined;
-                        room.devices.delete(deviceId);
+                            guestDevice.socket.send(JSON.stringify({
+                                type: "connection-established",
+                                peerName: hostDevice.name,
+                                peerId: room.host
+                            }));
+                        }
+
+                        console.log(`✅ Room ${room.id} fully connected`);
                     }
-                }, HANDSHAKE_DURATION);
+                    break;
+                }
 
-                break;
+                // Text sharing
+                case "text-share": {
+                    if (!isAuthenticated) {
+                        ws.close(1008, "Unauthorized");
+                        return;
+                    }
 
+                    if (!message.text || typeof message.text !== 'string') {
+                        ws.send(JSON.stringify({ 
+                            type: "error", 
+                            message: "Invalid text content" 
+                        }));
+                        return;
+                    }
+
+                    if (message.text.length > 1024 * 1024) { // 1MB
+                        ws.send(JSON.stringify({ 
+                            type: "error", 
+                            message: "Text too large (max 1MB)" 
+                        }));
+                        return;
+                    }
+
+                    relayMessage(deviceId, JSON.stringify({
+                        type: "text-received",
+                        text: message.text,
+                        timestamp: Date.now()
+                    }));
+                    break;
+                }
+
+                // Clipboard sharing
+                case "clipboard-share": {
+                    if (!isAuthenticated) {
+                        ws.close(1008, "Unauthorized");
+                        return;
+                    }
+
+                    if (!message.text || typeof message.text !== 'string') {
+                        ws.send(JSON.stringify({ 
+                            type: "error", 
+                            message: "Invalid clipboard content" 
+                        }));
+                        return;
+                    }
+
+                    if (message.text.length > 512 * 1024) { // 512KB
+                        ws.send(JSON.stringify({ 
+                            type: "error", 
+                            message: "Clipboard content too large" 
+                        }));
+                        return;
+                    }
+
+                    relayMessage(deviceId, JSON.stringify({
+                        type: "clipboard-received",
+                        text: message.text,
+                        timestamp: Date.now()
+                    }));
+                    break;
+                }
+
+                // Encryption key exchange
+                case "key-exchange": {
+                    if (!isAuthenticated) {
+                        ws.close(1008, "Unauthorized");
+                        return;
+                    }
+
+                    if (!message.key) {
+                        ws.send(JSON.stringify({ 
+                            type: "error", 
+                            message: "Missing encryption key" 
+                        }));
+                        return;
+                    }
+
+                    relayMessage(deviceId, JSON.stringify({
+                        type: "encryption-key",
+                        key: message.key,
+                        from: deviceId
+                    }));
+                    break;
+                }
+
+                // File transfer messages
+                case "file-offer":
+                case "file-accept":
+                case "file-reject":
+                case "file-meta":
+                case "file-complete":
+                case "file-chunk":
+                case "transfer-pause":
+                case "transfer-resume": {
+                    if (!isAuthenticated) {
+                        ws.close(1008, "Unauthorized");
+                        return;
+                    }
+
+                    relayMessage(deviceId, JSON.stringify(message));
+                    break;
+                }
+
+                // ✅ FIX 4: Pong response
+                case "pong": {
+                    lastPingTime = Date.now();
+                    break;
+                }
+
+                default:
+                    // Unknown message type - relay for forward compatibility
+                    if (isAuthenticated) {
+                        relayMessage(deviceId, JSON.stringify(message));
+                    }
             }
-            default:
-                // RELAY EVERYTHING ELSE
-                relayMessage(deviceId, JSON.stringify(message));
+        } catch (error) {
+            console.error("Error handling message:", error);
+            ws.send(JSON.stringify({ 
+                type: "error", 
+                message: "Internal server error" 
+            }));
         }
     });
 
+    // ✅ FIX 4: Enhanced ping/pong
     const ping = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
+            // Check if client is still alive
+            if (Date.now() - lastPingTime > CONNECTION_TIMEOUT) {
+                console.log(`Device ${deviceId} timed out`);
+                ws.terminate();
+                return;
+            }
+
             ws.send(JSON.stringify({ type: "ping" }));
         }
-    }, 5000);
+    }, PING_INTERVAL);
 
-    ws.on("close", () => {
+    // Connection error handling
+    ws.on("error", (error) => {
+        console.error(`WebSocket error for device ${deviceId}:`, error);
+    });
+
+    // Enhanced cleanup on close
+    ws.on("close", (code, reason) => {
+        console.log(`Device ${deviceId} disconnected. Code: ${code}`);
+
         const room = getRoomByDevice(deviceId);
 
         if (room) {
             const peerId = room.host === deviceId ? room.guest : room.host;
             if (peerId) {
                 const peer = getDevice(peerId);
-                peer?.socket.send(JSON.stringify({ type: "peer-disconnected" }));
+                if (peer && peer.socket.readyState === WebSocket.OPEN) {
+                    peer.socket.send(JSON.stringify({ 
+                        type: "peer-disconnected",
+                        peerId: deviceId
+                    }));
+                }
             }
         }
 
         removeDevice(deviceId);
         removeDeviceFromRooms(deviceId);
         clearInterval(ping);
+        clearInterval(resetInterval);
     });
+
+    // Send welcome message
+    ws.send(JSON.stringify({ 
+        type: "welcome", 
+        message: "Connected to FluxSend",
+        version: "2.0.0",
+        features: [
+            "file-transfer",
+            "text-share",
+            "clipboard-share",
+            "encryption",
+            "resume-transfer",
+            "peer-ready-handshake"
+        ]
+    }));
 }
