@@ -9,15 +9,15 @@ type Room = {
     createdAt: number;
     expiresAt: number;
     lastActivity: number;
-    encryption?: boolean; // Track if encryption is enabled
-    transferCount?: number; // Track number of transfers
+    encryption?: boolean;
+    transferCount?: number;
 };
 
 const rooms = new Map<string, Room>();
 
-// Better code generation (more readable)
+// OPTIMIZED: Better random code generation with collision avoidance
 function generateCode(length: number): string {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Removed confusing chars (I,O,0,1)
     let result = '';
     for (let i = 0; i < length; i++) {
         result += chars.charAt(Math.floor(Math.random() * chars.length));
@@ -25,15 +25,16 @@ function generateCode(length: number): string {
     return result;
 }
 
-// Generate unique room ID (prevent collisions)
+// OPTIMIZED: Faster unique ID generation
 function generateUniqueRoomId(): string {
     let attempts = 0;
-    while (attempts < 10) {
+    while (attempts < 20) { // Increased attempts
         const id = generateCode(6);
         if (!rooms.has(id)) return id;
         attempts++;
     }
-    throw new Error("Failed to generate unique room ID");
+    // Fallback: use timestamp suffix if collision persists
+    return generateCode(6) + Date.now().toString(36).slice(-2).toUpperCase();
 }
 
 // CREATE ROOM
@@ -47,7 +48,7 @@ export function createRoom(hostDeviceId: string): Room {
             readyPeers: new Set(),
             status: "waiting",
             createdAt: Date.now(),
-            expiresAt: Date.now() + 5 * 60 * 1000, // 5 minutes to join
+            expiresAt: Date.now() + 5 * 60 * 1000, // 5 minutes
             lastActivity: Date.now(),
             transferCount: 0
         };
@@ -63,7 +64,7 @@ export function createRoom(hostDeviceId: string): Room {
     }
 }
 
-// JOIN ROOM (enhanced validation)
+// OPTIMIZED: Join room with better validation
 export function joinRoom(roomId: string, token: string | undefined, deviceId: string): Room | null {
     const room = rooms.get(roomId.toUpperCase());
     
@@ -85,18 +86,24 @@ export function joinRoom(roomId: string, token: string | undefined, deviceId: st
         return null;
     }
 
-    // Token validation (optional - for QR code joins)
+    // Prevent host from joining their own room
+    if (room.host === deviceId) {
+        console.log(`Host cannot join their own room: ${roomId}`);
+        return null;
+    }
+
+    // OPTIMIZED: Token validation only for QR code joins
+    // Manual joins (no token) are allowed for easier pairing
     if (token && room.token !== token) {
         console.log(`Invalid token for room: ${roomId}`);
-        // Allow token-less joins (manual room ID entry)
-        // return null;
+        return null;
     }
 
     room.devices.add(deviceId);
     room.guest = deviceId;
     room.status = "connecting";
     room.lastActivity = Date.now();
-    room.expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes after connection
+    room.expiresAt = Date.now() + 30 * 60 * 1000; // Extended: 30 minutes for active connection
 
     console.log(`Device ${deviceId} joined room ${room.id}`);
 
@@ -109,7 +116,7 @@ export function removeDeviceFromRooms(deviceId: string): void {
         room.devices.delete(deviceId);
         room.readyPeers.delete(deviceId);
 
-        // Host left → destroy room
+        // Host left → destroy room immediately
         if (room.host === deviceId) {
             console.log(`Room destroyed (host left): ${id}`);
             rooms.delete(id);
@@ -122,6 +129,7 @@ export function removeDeviceFromRooms(deviceId: string): void {
             room.guest = undefined;
             room.status = "waiting";
             room.readyPeers.clear();
+            room.expiresAt = Date.now() + 5 * 60 * 1000; // Reset to 5 minutes
         }
 
         // No devices left → cleanup
@@ -142,53 +150,79 @@ export function getRoomByDevice(deviceId: string): Room | null {
     return null;
 }
 
+// OPTIMIZED: Get room by ID directly (faster lookup)
+export function getRoomById(roomId: string): Room | null {
+    return rooms.get(roomId.toUpperCase()) || null;
+}
+
 // GET ROOM STATS (for monitoring)
 export function getRoomStats() {
+    const now = Date.now();
     return {
         totalRooms: rooms.size,
         activeConnections: Array.from(rooms.values()).filter(r => r.status === "connected").length,
         waitingRooms: Array.from(rooms.values()).filter(r => r.status === "waiting").length,
+        connectingRooms: Array.from(rooms.values()).filter(r => r.status === "connecting").length,
         rooms: Array.from(rooms.values()).map(r => ({
             id: r.id,
             status: r.status,
             devices: r.devices.size,
-            age: Math.floor((Date.now() - r.createdAt) / 1000),
-            transfers: r.transferCount
+            ageSeconds: Math.floor((now - r.createdAt) / 1000),
+            lastActivitySeconds: Math.floor((now - r.lastActivity) / 1000),
+            transfers: r.transferCount,
+            hasGuest: !!r.guest
         }))
     };
 }
 
-// CLEANUP EXPIRED ROOMS (enhanced)
+// OPTIMIZED: Aggressive cleanup with better time windows
 setInterval(() => {
     const now = Date.now();
     let cleaned = 0;
 
     for (const [id, room] of rooms.entries()) {
-        // Don't kill active transfers
-        if (room.status === "connected" && now - room.lastActivity < 30 * 60 * 1000) {
-            continue; // Keep active rooms for 30 min
-        }
+        const age = now - room.createdAt;
+        const inactiveTime = now - room.lastActivity;
 
-        // Remove inactive waiting rooms after 5 min
-        if (room.status === "waiting" && now - room.createdAt > 5 * 60 * 1000) {
-            rooms.delete(id);
-            cleaned++;
-            console.log(`Cleaned inactive room: ${id}`);
+        // Keep active transfers alive longer (60 minutes max)
+        if (room.status === "connected" && inactiveTime < 60 * 60 * 1000) {
             continue;
         }
 
-        // Remove stuck connecting rooms after 2 min
-        if (room.status === "connecting" && now - room.lastActivity > 2 * 60 * 1000) {
+        // Remove inactive connected rooms after 60 minutes
+        if (room.status === "connected" && inactiveTime >= 60 * 60 * 1000) {
             rooms.delete(id);
             cleaned++;
-            console.log(`Cleaned stuck room: ${id}`);
+            console.log(`Cleaned inactive connected room: ${id} (inactive for ${Math.floor(inactiveTime / 60000)}min)`);
+            continue;
+        }
+
+        // Remove waiting rooms after 5 minutes
+        if (room.status === "waiting" && age > 5 * 60 * 1000) {
+            rooms.delete(id);
+            cleaned++;
+            console.log(`Cleaned waiting room: ${id} (age: ${Math.floor(age / 60000)}min)`);
+            continue;
+        }
+
+        // Remove stuck connecting rooms after 2 minutes
+        if (room.status === "connecting" && inactiveTime > 2 * 60 * 1000) {
+            rooms.delete(id);
+            cleaned++;
+            console.log(`Cleaned stuck connecting room: ${id} (inactive for ${Math.floor(inactiveTime / 1000)}s)`);
         }
     }
 
     if (cleaned > 0) {
-        console.log(`Cleaned ${cleaned} rooms. Active: ${rooms.size}`);
+        console.log(`🧹 Cleaned ${cleaned} rooms. Active: ${rooms.size}`);
     }
 }, 30_000); // Check every 30 seconds
+
+// OPTIMIZED: Periodic stats logging (every 5 minutes)
+setInterval(() => {
+    const stats = getRoomStats();
+    console.log(`Room Stats: ${stats.totalRooms} total | ${stats.activeConnections} connected | ${stats.waitingRooms} waiting | ${stats.connectingRooms} connecting`);
+}, 5 * 60 * 1000);
 
 // Export rooms for relay
 export { rooms };

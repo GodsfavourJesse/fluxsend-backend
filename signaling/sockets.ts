@@ -10,11 +10,10 @@ import {
 import { relayMessage } from "./relay";
 
 const HANDSHAKE_DURATION = 15_000;
-const MAX_MESSAGE_SIZE = 10 * 1024 * 1024; // 10MB for text/clipboard
-const PING_INTERVAL = 30_000; // 30s ping
-const CONNECTION_TIMEOUT = 45_000; // Render-safe
+const MAX_MESSAGE_SIZE = 10 * 1024 * 1024;
+const PING_INTERVAL = 30_000;
+const CONNECTION_TIMEOUT = 45_000;
 
-// Helper to get buffer length from RawData
 function getDataLength(data: RawData): number {
     if (Buffer.isBuffer(data)) {
         return data.length;
@@ -28,7 +27,6 @@ function getDataLength(data: RawData): number {
     return 0;
 }
 
-// Helper to convert RawData to Buffer
 function toBuffer(data: RawData): Buffer {
     if (Buffer.isBuffer(data)) {
         return data;
@@ -47,24 +45,21 @@ export function handleSocket(ws: WebSocket) {
     let isAuthenticated = false;
     let lastPingTime = Date.now();
 
-    // Rate limiting (excluding binary chunks)
     let messageCount = 0;
-    const messageLimit = 100; // 100 messages per minute
+    const messageLimit = 100;
     const resetInterval = setInterval(() => {
         messageCount = 0;
     }, 60_000);
 
     ws.on("message", (raw: RawData, isBinary: boolean) => {
-        // Update activity
         lastPingTime = Date.now();
 
-        // FIX 3: Do NOT rate-limit binary chunks
         if (!isBinary) {
             messageCount++;
             if (messageCount > messageLimit) {
                 ws.send(JSON.stringify({ 
                     type: "error", 
-                    message: "Rate limit exceeded. Slow down!" 
+                    message: "Rate limit exceeded" 
                 }));
                 return;
             }
@@ -86,9 +81,8 @@ export function handleSocket(ws: WebSocket) {
                 return;
             }
 
-            // FIXED: Proper length check for RawData
             const dataLength = getDataLength(raw);
-            if (dataLength > 64 * 1024 * 1024) { // 64MB max chunk
+            if (dataLength > 64 * 1024 * 1024) {
                 ws.send(JSON.stringify({ 
                     type: "error", 
                     message: "Chunk too large" 
@@ -102,7 +96,6 @@ export function handleSocket(ws: WebSocket) {
 
         let message: any;
         try {
-            // FIXED: Proper length check for RawData
             const dataLength = getDataLength(raw);
             if (dataLength > MAX_MESSAGE_SIZE) {
                 ws.send(JSON.stringify({ 
@@ -192,19 +185,64 @@ export function handleSocket(ws: WebSocket) {
                         return;
                     }
 
-                    // Notify host
+                    const guestDevice = getDevice(deviceId);
+                    if (!guestDevice) {
+                        ws.send(JSON.stringify({ 
+                            type: "error", 
+                            message: "Failed to register device" 
+                        }));
+                        return;
+                    }
+
+                    // CRITICAL FIX: Notify BOTH peers about each other
+                    console.log(`Guest ${deviceId} joining room ${room.id}`);
+
+                    // Notify host about guest
                     host.socket.send(JSON.stringify({
                         type: "peer-joining",
                         peerName: message.deviceName,
                         peerId: deviceId
                     }));
 
-                    // Notify guest
+                    // Notify guest about host
                     ws.send(JSON.stringify({
                         type: "peer-joining",
                         peerName: host.name,
                         peerId: room.host
                     }));
+
+                    // CRITICAL FIX: AUTO-SEND peer-ready from both sides
+                    // This ensures the handshake completes immediately
+                    setTimeout(() => {
+                        // Mark both as ready
+                        room.readyPeers.add(deviceId);
+                        room.readyPeers.add(room.host);
+                        
+                        // If both ready, establish connection
+                        if (room.readyPeers.size === 2 && room.status !== "connected") {
+                            room.status = "connected";
+                            room.lastActivity = Date.now();
+
+                            const hostDevice = getDevice(room.host);
+                            const guestDevice = getDevice(room.guest!);
+
+                            if (hostDevice && guestDevice) {
+                                console.log(`Connection established for room ${room.id}`);
+
+                                hostDevice.socket.send(JSON.stringify({
+                                    type: "connection-established",
+                                    peerName: guestDevice.name,
+                                    peerId: room.guest
+                                }));
+
+                                guestDevice.socket.send(JSON.stringify({
+                                    type: "connection-established",
+                                    peerName: hostDevice.name,
+                                    peerId: room.host
+                                }));
+                            }
+                        }
+                    }, 100); // Small delay to ensure both devices are registered
 
                     // Exchange encryption keys if provided
                     if (message.encryptionKey) {
@@ -218,7 +256,7 @@ export function handleSocket(ws: WebSocket) {
                     break;
                 }
 
-                // FIX 1: Peer ready confirmation
+                // BACKUP: Manual peer-ready (in case auto-ready fails)
                 case "peer-ready": {
                     if (!isAuthenticated) {
                         ws.close(1008, "Unauthorized");
@@ -227,14 +265,10 @@ export function handleSocket(ws: WebSocket) {
 
                     const room = getRoomByDevice(deviceId);
                     if (!room) {
-                        ws.send(JSON.stringify({
-                            type: "error",
-                            message: "No room found"
-                        }));
+                        console.log("No room found for peer-ready");
                         return;
                     }
                     
-                    // Get the peer's ID
                     const peerId = room.host === deviceId ? room.guest : room.host;
                     if (!peerId) {
                         console.log("No peer ID found yet");
@@ -246,19 +280,12 @@ export function handleSocket(ws: WebSocket) {
                         console.log("Peer device not found");
                         return;
                     }
-                    
-                    // FIXED: Get host device properly
-                    const hostDevice = getDevice(room.host);
-                    const guestDevice = room.guest ? getDevice(room.guest) : null;
-                    
-                    if (!hostDevice) {
-                        console.log("Host device not found");
-                        return;
-                    }
 
                     room.readyPeers.add(deviceId);
+                    console.log(`Peer ready: ${deviceId}, Ready count: ${room.readyPeers.size}`);
+
                     if (room.readyPeers.size < 2) {
-                        return; // wait for both peers
+                        return;
                     }
                     
                     if (room.status !== "connected") {
@@ -269,6 +296,8 @@ export function handleSocket(ws: WebSocket) {
                         const guestDevice = room.guest ? getDevice(room.guest) : null;
 
                         if (hostDevice && guestDevice) {
+                            console.log(`Connection established via peer-ready for room ${room.id}`);
+
                             hostDevice.socket.send(JSON.stringify({
                                 type: "connection-established",
                                 peerName: guestDevice.name,
@@ -282,9 +311,9 @@ export function handleSocket(ws: WebSocket) {
                             }));
                         }
                     }
+                    break;
                 }
 
-                // Text sharing
                 case "text-share": {
                     if (!isAuthenticated) {
                         ws.close(1008, "Unauthorized");
@@ -299,7 +328,7 @@ export function handleSocket(ws: WebSocket) {
                         return;
                     }
 
-                    if (message.text.length > 1024 * 1024) { // 1MB
+                    if (message.text.length > 1024 * 1024) {
                         ws.send(JSON.stringify({ 
                             type: "error", 
                             message: "Text too large (max 1MB)" 
@@ -315,7 +344,6 @@ export function handleSocket(ws: WebSocket) {
                     break;
                 }
 
-                // Clipboard sharing
                 case "clipboard-share": {
                     if (!isAuthenticated) {
                         ws.close(1008, "Unauthorized");
@@ -330,7 +358,7 @@ export function handleSocket(ws: WebSocket) {
                         return;
                     }
 
-                    if (message.text.length > 512 * 1024) { // 512KB
+                    if (message.text.length > 512 * 1024) {
                         ws.send(JSON.stringify({ 
                             type: "error", 
                             message: "Clipboard content too large" 
@@ -351,8 +379,6 @@ export function handleSocket(ws: WebSocket) {
                     relayMessage(deviceId, JSON.stringify(message));
                     break;
 
-
-                // Encryption key exchange
                 case "key-exchange": {
                     if (!isAuthenticated) {
                         ws.close(1008, "Unauthorized");
@@ -375,7 +401,6 @@ export function handleSocket(ws: WebSocket) {
                     break;
                 }
 
-                // File transfer messages
                 case "file-offer":
                 case "file-accept":
                 case "file-reject":
@@ -399,25 +424,21 @@ export function handleSocket(ws: WebSocket) {
                     const room = getRoomByDevice(deviceId);
                     if (!room) return;
                     
-                    // Relay disconnect message to peer
                     relayMessage(deviceId, JSON.stringify({
                         type: "graceful-disconnect",
                         message: message.message || "Peer left the room"
                     }));
                     
-                    // Close connection
                     ws.close(1000, "Graceful disconnect");
                     break;
                 }
 
-                // FIX 4: Pong response
                 case "pong": {
                     lastPingTime = Date.now();
                     break;
                 }
 
                 default:
-                    // Unknown message type - relay for forward compatibility
                     if (isAuthenticated) {
                         relayMessage(deviceId, JSON.stringify(message));
                     }
@@ -431,10 +452,8 @@ export function handleSocket(ws: WebSocket) {
         }
     });
 
-    // FIX 4: Enhanced ping/pong
     const ping = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
-            // Check if client is still alive
             if (Date.now() - lastPingTime > CONNECTION_TIMEOUT) {
                 console.log(`Device ${deviceId} timed out`);
                 ws.terminate();
@@ -445,12 +464,10 @@ export function handleSocket(ws: WebSocket) {
         }
     }, PING_INTERVAL);
 
-    // Connection error handling
     ws.on("error", (error) => {
         console.error(`WebSocket error for device ${deviceId}:`, error);
     });
 
-    // Enhanced cleanup on close
     ws.on("close", (code, reason) => {
         console.log(`Device ${deviceId} disconnected. Code: ${code}`);
 
@@ -475,18 +492,17 @@ export function handleSocket(ws: WebSocket) {
         clearInterval(resetInterval);
     });
 
-    // Send welcome message
     ws.send(JSON.stringify({ 
         type: "welcome", 
         message: "Connected to FluxSend",
-        version: "2.0.0",
+        version: "2.0.1",
         features: [
             "file-transfer",
             "text-share",
             "clipboard-share",
             "encryption",
             "resume-transfer",
-            "peer-ready-handshake"
+            "auto-handshake"
         ]
     }));
 }
