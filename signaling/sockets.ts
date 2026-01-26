@@ -45,7 +45,6 @@ function toBuffer(data: RawData): Buffer {
 export function handleSocket(ws: WebSocket) {
     const deviceId = uuid();
     let isAuthenticated = false;
-    let isPeerReady = false;
     let lastPingTime = Date.now();
 
     // Rate limiting (excluding binary chunks)
@@ -141,7 +140,6 @@ export function handleSocket(ws: WebSocket) {
                     });
                     
                     isAuthenticated = true;
-                    isPeerReady = false;
                     
                     const room = createRoom(deviceId);
 
@@ -170,7 +168,6 @@ export function handleSocket(ws: WebSocket) {
                     });
                     
                     isAuthenticated = true;
-                    isPeerReady = false;
 
                     const room = joinRoom(
                         message.roomId.toUpperCase(), 
@@ -236,38 +233,42 @@ export function handleSocket(ws: WebSocket) {
                         }));
                         return;
                     }
-
-                    isPeerReady = true;
-
+                    
                     // Get the peer's ID
                     const peerId = room.host === deviceId ? room.guest : room.host;
                     if (!peerId) {
                         console.log("No peer ID found yet");
                         return;
                     }
-
+                    
                     const peer = getDevice(peerId);
                     if (!peer) {
                         console.log("Peer device not found");
                         return;
                     }
-
+                    
                     // FIXED: Get host device properly
                     const hostDevice = getDevice(room.host);
                     const guestDevice = room.guest ? getDevice(room.guest) : null;
-
+                    
                     if (!hostDevice) {
                         console.log("Host device not found");
                         return;
                     }
 
-                    // Mark room as connected only when BOTH are ready
-                    if (room.status === "connecting") {
+                    room.readyPeers.add(deviceId);
+                    if (room.readyPeers.size < 2) {
+                        return; // wait for both peers
+                    }
+                    
+                    if (room.status !== "connected") {
                         room.status = "connected";
                         room.lastActivity = Date.now();
 
-                        // Notify both peers
-                        if (guestDevice) {
+                        const hostDevice = getDevice(room.host);
+                        const guestDevice = room.guest ? getDevice(room.guest) : null;
+
+                        if (hostDevice && guestDevice) {
                             hostDevice.socket.send(JSON.stringify({
                                 type: "connection-established",
                                 peerName: guestDevice.name,
@@ -280,10 +281,7 @@ export function handleSocket(ws: WebSocket) {
                                 peerId: room.host
                             }));
                         }
-
-                        console.log(`Room ${room.id} fully connected`);
                     }
-                    break;
                 }
 
                 // Text sharing
@@ -310,7 +308,7 @@ export function handleSocket(ws: WebSocket) {
                     }
 
                     relayMessage(deviceId, JSON.stringify({
-                        type: "text-received",
+                        type: "text-share",
                         text: message.text,
                         timestamp: Date.now()
                     }));
@@ -341,12 +339,18 @@ export function handleSocket(ws: WebSocket) {
                     }
 
                     relayMessage(deviceId, JSON.stringify({
-                        type: "clipboard-received",
+                        type: "clipboard-share",
                         text: message.text,
                         timestamp: Date.now()
                     }));
                     break;
                 }
+
+                case "text-received":
+                    message.type = "text-share";
+                    relayMessage(deviceId, JSON.stringify(message));
+                    break;
+
 
                 // Encryption key exchange
                 case "key-exchange": {
